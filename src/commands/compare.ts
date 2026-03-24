@@ -11,6 +11,8 @@ import {
   markdownTable,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { querySessions, queryApiCalls } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -201,7 +203,7 @@ function formatDelta(a: number, b: number): string {
   return `${sign}${pct.toFixed(1)}%`;
 }
 
-export async function runCompare(args: string[]): Promise<void> {
+export async function runCompare(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -228,10 +230,22 @@ export async function runCompare(args: string[]): Promise<void> {
   const rangeB = parsePeriod(values.b);
 
   // Load both periods
-  const [dataA, dataB] = await Promise.all([
-    loadPeriod(rangeA),
-    loadPeriod(rangeB),
-  ]);
+  let dataA, dataB;
+  if (useDb) {
+    const db = openDatabase();
+    const sessionsA = querySessions(db, { since: rangeA.since, until: rangeA.until });
+    const callsA = queryApiCalls(db, { since: rangeA.since, until: rangeA.until });
+    const sessionsB = querySessions(db, { since: rangeB.since, until: rangeB.until });
+    const callsB = queryApiCalls(db, { since: rangeB.since, until: rangeB.until });
+    closeDatabase();
+    dataA = { sessions: sessionsA, calls: callsA };
+    dataB = { sessions: sessionsB, calls: callsB };
+  } else {
+    [dataA, dataB] = await Promise.all([
+      loadPeriod(rangeA),
+      loadPeriod(rangeB),
+    ]);
+  }
 
   const statsA = computePeriodStats(rangeA.label, dataA.sessions, dataA.calls);
   const statsB = computePeriodStats(rangeB.label, dataB.sessions, dataB.calls);

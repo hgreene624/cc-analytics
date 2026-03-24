@@ -7,6 +7,8 @@ import {
   formatPercent,
   markdownTable,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { queryApiCalls } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -40,7 +42,7 @@ interface ModelStats {
   cacheReadTokens: number;
 }
 
-export async function runModels(args: string[]): Promise<void> {
+export async function runModels(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -60,18 +62,25 @@ export async function runModels(args: string[]): Promise<void> {
   const since = values.since ? parseTimeValue(values.since) : undefined;
   const until = values.until ? parseTimeValue(values.until) : undefined;
 
-  const files = await discoverFiles({ since, until });
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified time window.");
-    return;
-  }
+  let allCalls: ApiCall[];
+  if (useDb) {
+    const db = openDatabase();
+    allCalls = queryApiCalls(db, { since, until });
+    closeDatabase();
+  } else {
+    const files = await discoverFiles({ since, until });
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified time window.");
+      return;
+    }
 
-  const allCalls: ApiCall[] = [];
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      allCalls.push(...calls);
-    } catch { /* skip */ }
+    allCalls = [];
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        allCalls.push(...calls);
+      } catch { /* skip */ }
+    }
   }
 
   if (allCalls.length === 0) {

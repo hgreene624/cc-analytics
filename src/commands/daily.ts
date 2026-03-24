@@ -215,7 +215,8 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
     // Print session window separator
     if (wNum !== lastWindowNum) {
       if (lastWindowNum >= 0) {
-        console.log(`     │${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+        console.log(`      ${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+        console.log(``);
       }
       lastWindowNum = wNum;
     }
@@ -223,15 +224,15 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
     const time = timeLabel(b.time);
     const charIdx = wNum % barChars.length;
     const chart = barChars[charIdx].repeat(Math.max(0, Math.round((b.rateLimitTokens / maxRL) * chartWidth)));
-    console.log(`${time} │ ${chart.padEnd(chartWidth)} ${fmt(b.rateLimitTokens).padStart(6)}`);
+    console.log(`${time}  ${chart.padEnd(chartWidth)} ${fmt(b.rateLimitTokens).padStart(6)}`);
   }
 
   // Final window separator
   if (lastWindowNum >= 0) {
-    console.log(`     │${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+    console.log(`      ${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
   }
 
-  console.log(`     └${"─".repeat(sepWidth - 6)}`);
+  console.log(``);
 
   const avgPerInterval = activeIntervals > 0 ? Math.round(totalRL / activeIntervals) : 0;
   console.log(`\nPeak: ${timeLabel(peakRow.time)} (${fmt(peakRow.rateLimitTokens)}/${stepLabel}) • Total: ${fmt(totalRL)} • Avg active: ${fmt(avgPerInterval)}/${stepLabel}`);

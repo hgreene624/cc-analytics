@@ -11,6 +11,8 @@ import {
   markdownTable,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { querySessions } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -34,7 +36,7 @@ Examples:
 `);
 }
 
-export async function runScan(args: string[]): Promise<void> {
+export async function runScan(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -54,31 +56,42 @@ export async function runScan(args: string[]): Promise<void> {
   const since = values.since ? parseTimeValue(values.since) : undefined;
   const until = values.until ? parseTimeValue(values.until) : undefined;
 
-  // Step 1: Discover files
-  const files = await discoverFiles({ since, until });
-
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified time window.");
-    return;
-  }
-
-  // Step 2: Parse each file
-  const callsByFile = new Map<string, ApiCall[]>();
+  let sessions: SessionSummary[];
+  let totalFiles = 0;
   let parseErrors = 0;
 
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      if (calls.length > 0) {
-        callsByFile.set(file.path, calls);
-      }
-    } catch {
-      parseErrors++;
-    }
-  }
+  if (useDb) {
+    const db = openDatabase();
+    sessions = querySessions(db, { since, until });
+    closeDatabase();
+  } else {
+    // Step 1: Discover files
+    const files = await discoverFiles({ since, until });
 
-  // Step 3: Aggregate sessions
-  const sessions = aggregateSessions(files, callsByFile);
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified time window.");
+      return;
+    }
+
+    totalFiles = files.length;
+
+    // Step 2: Parse each file
+    const callsByFile = new Map<string, ApiCall[]>();
+
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        if (calls.length > 0) {
+          callsByFile.set(file.path, calls);
+        }
+      } catch {
+        parseErrors++;
+      }
+    }
+
+    // Step 3: Aggregate sessions
+    sessions = aggregateSessions(files, callsByFile);
+  }
 
   // Step 4: Output
   if (values.json) {
@@ -87,7 +100,6 @@ export async function runScan(args: string[]): Promise<void> {
   }
 
   // Summary line
-  const totalFiles = files.length;
   const totalSessions = sessions.length;
   const totalSubagents = sessions.reduce((sum, s) => sum + s.subagentSessions.length, 0);
   const grandTotal = sessions.reduce((sum, s) => sum + s.totalTokens, 0);

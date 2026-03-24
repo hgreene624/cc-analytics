@@ -12,6 +12,8 @@ import {
   formatPercent,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { queryApiCalls, querySessions } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -46,7 +48,7 @@ function parseWindowDuration(value: string): number {
   return unit === "h" ? amount * 3600_000 : amount * 60_000;
 }
 
-export async function runBudget(args: string[]): Promise<void> {
+export async function runBudget(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -67,37 +69,40 @@ export async function runBudget(args: string[]): Promise<void> {
   const windowMs = parseWindowDuration(values.window!);
   const windowStart = new Date(windowEnd.getTime() - windowMs);
 
-  // Discover files in the window (with some extra margin for mtime vs content timestamps)
-  const margin = 3600_000; // 1h margin
-  const files = await discoverFiles({
-    since: new Date(windowStart.getTime() - margin),
-    until: new Date(windowEnd.getTime() + margin),
-  });
+  let windowCalls: ApiCall[];
+  let sessionInfoMap: Map<string, { projectDir: string; teamName?: string }>;
 
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified window.");
-    return;
+  if (useDb) {
+    const db = openDatabase();
+    windowCalls = queryApiCalls(db, { since: windowStart, until: windowEnd });
+    const dbSessions = querySessions(db, { since: windowStart, until: windowEnd });
+    sessionInfoMap = new Map(dbSessions.map((s) => [s.sessionId, { projectDir: s.projectDir, teamName: s.teamName }]));
+    closeDatabase();
+  } else {
+    const margin = 3600_000;
+    const files = await discoverFiles({
+      since: new Date(windowStart.getTime() - margin),
+      until: new Date(windowEnd.getTime() + margin),
+    });
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified window.");
+      return;
+    }
+    const callsByFile = new Map<string, ApiCall[]>();
+    const allCalls: ApiCall[] = [];
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        if (calls.length > 0) { callsByFile.set(file.path, calls); allCalls.push(...calls); }
+      } catch { /* skip */ }
+    }
+    windowCalls = allCalls.filter((c) => {
+      const t = new Date(c.timestamp).getTime();
+      return t >= windowStart.getTime() && t <= windowEnd.getTime();
+    });
+    const sessions = aggregateSessions(files, callsByFile);
+    sessionInfoMap = new Map(sessions.map((s) => [s.sessionId, { projectDir: s.projectDir, teamName: s.teamName }]));
   }
-
-  // Parse all files
-  const callsByFile = new Map<string, ApiCall[]>();
-  const allCalls: ApiCall[] = [];
-
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      if (calls.length > 0) {
-        callsByFile.set(file.path, calls);
-        allCalls.push(...calls);
-      }
-    } catch { /* skip */ }
-  }
-
-  // Filter calls to the actual window
-  const windowCalls = allCalls.filter((c) => {
-    const t = new Date(c.timestamp).getTime();
-    return t >= windowStart.getTime() && t <= windowEnd.getTime();
-  });
 
   if (windowCalls.length === 0) {
     console.log(`No API calls found in window ${formatTime(windowStart.toISOString())} → ${formatTime(windowEnd.toISOString())}.`);
@@ -124,10 +129,6 @@ export async function runBudget(args: string[]): Promise<void> {
     entry.totalTokens += call.totalTokens;
     entry.rateLimitTokens += call.rateLimitTokens;
   }
-
-  // Get session summaries for project/team info
-  const sessions = aggregateSessions(files, callsByFile);
-  const sessionInfoMap = new Map(sessions.map((s) => [s.sessionId, s]));
 
   // Acceleration detection: find per-minute rates and detect spike
   const minuteBuckets = new Map<number, number>();

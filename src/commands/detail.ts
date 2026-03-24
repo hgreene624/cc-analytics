@@ -10,6 +10,8 @@ import {
   formatPercent,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { querySessionCalls } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -33,7 +35,7 @@ Examples:
 `);
 }
 
-export async function runDetail(args: string[]): Promise<void> {
+export async function runDetail(args: string[], useDb = false): Promise<void> {
   // Extract positional session ID before parseArgs
   const positionalArgs: string[] = [];
   const flagArgs: string[] = [];
@@ -60,6 +62,68 @@ export async function runDetail(args: string[]): Promise<void> {
   }
 
   const searchId = positionalArgs[0].toLowerCase();
+
+  if (useDb) {
+    const db = openDatabase();
+    const allSessions = db
+      .prepare("SELECT DISTINCT session_id FROM api_calls WHERE session_id LIKE ?")
+      .all(`${searchId}%`) as Array<{ session_id: string }>;
+    if (allSessions.length === 0) {
+      console.error(`No session found matching "${searchId}".`);
+      closeDatabase();
+      process.exit(1);
+    }
+    if (allSessions.length > 1) {
+      console.error(`Ambiguous session ID "${searchId}" matches ${allSessions.length} sessions:`);
+      for (const m of allSessions.slice(0, 10)) console.error(`  ${m.session_id}`);
+      closeDatabase();
+      process.exit(1);
+    }
+    const sessionId = allSessions[0].session_id;
+    const sessionCalls = querySessionCalls(db, sessionId);
+    const sessionInfo = db.prepare("SELECT project_dir FROM sessions WHERE session_id = ?").get(sessionId) as { project_dir: string } | undefined;
+    closeDatabase();
+    if (sessionCalls.length === 0) {
+      console.error(`Session ${sessionId} found but has no API calls.`);
+      process.exit(1);
+    }
+    // Reuse existing output logic with computed values
+    const firstSeen = sessionCalls[0].timestamp;
+    const lastSeen = sessionCalls[sessionCalls.length - 1].timestamp;
+    const durationMs = new Date(lastSeen).getTime() - new Date(firstSeen).getTime();
+    let totalTokens2 = 0; let rateLimitTokens2 = 0;
+    const agentSet2 = new Set<string>(); let teamName2: string | undefined;
+    const modelCounts2 = new Map<string, number>();
+    for (const call of sessionCalls) {
+      totalTokens2 += call.totalTokens; rateLimitTokens2 += call.rateLimitTokens;
+      if (call.agentName) agentSet2.add(call.agentName);
+      if (call.teamName && !teamName2) teamName2 = call.teamName;
+      modelCounts2.set(call.model, (modelCounts2.get(call.model) ?? 0) + 1);
+    }
+    let primaryModel2 = ""; let bestCount2 = 0;
+    for (const [model, count] of modelCounts2) { if (count > bestCount2) { primaryModel2 = model; bestCount2 = count; } }
+    const session = { sessionId, projectDir: sessionInfo?.project_dir ?? "unknown", firstSeen, lastSeen, durationMs, totalTokens: totalTokens2, rateLimitTokens: rateLimitTokens2, totalCalls: sessionCalls.length, primaryModel: primaryModel2, teamName: teamName2, agents: Array.from(agentSet2), subagentSessions: [] as SessionSummary[] };
+
+    if (values.json) { console.log(JSON.stringify({ session, calls: sessionCalls }, null, 2)); return; }
+    console.log(`\n**Session Detail** — ${sessionId}\n`);
+    console.log(`- **Project:** ${formatProjectDir(session.projectDir)}`);
+    console.log(`- **Time Range:** ${formatTime(session.firstSeen)} → ${formatTime(session.lastSeen)}`);
+    console.log(`- **Duration:** ${formatDuration(session.durationMs)}`);
+    console.log(`- **Total Tokens:** ${formatTokens(session.totalTokens)}`);
+    console.log(`- **Rate Limit Tokens:** ${formatTokens(session.rateLimitTokens)}`);
+    console.log(`- **Model:** ${session.primaryModel}`);
+    console.log(`- **API Calls:** ${session.totalCalls}`);
+    if (session.teamName) console.log(`- **Team:** ${session.teamName}`);
+    const totalInput = sessionCalls.reduce((sum, c) => sum + c.inputTokens + c.cacheReadTokens, 0);
+    const totalCacheRead = sessionCalls.reduce((sum, c) => sum + c.cacheReadTokens, 0);
+    console.log(`- **Cache Efficiency:** ${formatPercent(totalInput > 0 ? totalCacheRead / totalInput : 0)} (cache_read / total_input)`);
+    console.log(`\n**API Calls** (${sessionCalls.length} total)\n`);
+    let runningTotal = 0;
+    const headers = ["#", "Time", "Model", "Input", "Output", "Cache Read", "Cache Create", "Total", "Cumulative"];
+    const rows = sessionCalls.map((c, i) => { runningTotal += c.totalTokens; return [String(i + 1), formatTime(c.timestamp), c.model.replace("claude-", ""), formatTokens(c.inputTokens), formatTokens(c.outputTokens), formatTokens(c.cacheReadTokens), formatTokens(c.cacheCreationTokens), formatTokens(c.totalTokens), formatTokens(runningTotal)]; });
+    console.log(markdownTable(headers, rows));
+    return;
+  }
 
   // Find files containing this session ID using grep for speed
   const { execSync } = await import("node:child_process");

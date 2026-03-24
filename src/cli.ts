@@ -62,6 +62,26 @@ async function main(): Promise<void> {
       await runScan(args.slice(1));
       break;
     }
+    case "top": {
+      const { runTop } = await import("./commands/top.js");
+      await runTop(args.slice(1));
+      break;
+    }
+    case "detail": {
+      const { runDetail } = await import("./commands/detail.js");
+      await runDetail(args.slice(1));
+      break;
+    }
+    case "budget": {
+      const { runBudget } = await import("./commands/budget.js");
+      await runBudget(args.slice(1));
+      break;
+    }
+    case "trend": {
+      const { runTrend } = await import("./commands/trend.js");
+      await runTrend(args.slice(1));
+      break;
+    }
     default:
       console.error(`Command '${command}' is not yet implemented.`);
       process.exit(1);

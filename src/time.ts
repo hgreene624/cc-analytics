@@ -24,6 +24,21 @@ export function parseTimeValue(value: string): Date {
     return d;
   }
 
+  // Clock time: "5am", "5pm", "5:30am", "14:00", "5:30pm" — interpreted as today
+  const clockMatch = lower.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (clockMatch) {
+    let hours = parseInt(clockMatch[1], 10);
+    const minutes = clockMatch[2] ? parseInt(clockMatch[2], 10) : 0;
+    const ampm = clockMatch[3];
+
+    if (ampm === "pm" && hours < 12) hours += 12;
+    if (ampm === "am" && hours === 12) hours = 0;
+
+    const d = new Date(now);
+    d.setHours(hours, minutes, 0, 0);
+    return d;
+  }
+
   // Relative: Nh, Nd, Nm
   const relativeMatch = lower.match(/^(\d+)(h|d|m)$/);
   if (relativeMatch) {

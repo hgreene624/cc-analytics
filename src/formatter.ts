@@ -31,10 +31,19 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * Truncate a session ID to first 8 characters.
+ * Truncate a session ID to first N characters (default 8).
  */
-export function truncateSessionId(id: string): string {
-  return id.slice(0, 8);
+export function truncateSessionId(id: string, len = 8): string {
+  return id.slice(0, len);
+}
+
+/**
+ * Format a ratio as a percentage string.
+ * e.g., 0.452 → "45.2%"
+ */
+export function formatPercent(ratio: number): string {
+  if (!isFinite(ratio)) return "0.0%";
+  return `${(ratio * 100).toFixed(1)}%`;
 }
 
 /**

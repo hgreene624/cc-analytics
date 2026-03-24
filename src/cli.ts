@@ -2,7 +2,7 @@
 
 import { parseArgs } from "node:util";
 
-const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "models", "teams", "projects", "cache", "anomalies", "audit", "import"] as const;
+const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "models", "teams", "projects", "cache", "anomalies", "import"] as const;
 type Command = (typeof COMMANDS)[number];
 
 function printUsage(): void {
@@ -24,7 +24,6 @@ Commands:
   projects    Project directory analysis
   cache       Cache efficiency report
   anomalies   Flag outlier sessions
-  audit       Full comprehensive audit
   import      Import JSONL to SQLite (optional)
 
 Global Options:
@@ -119,11 +118,6 @@ async function main(): Promise<void> {
     case "cache": {
       const { runCache } = await import("./commands/cache.js");
       await runCache(commandArgs, useDb);
-      break;
-    }
-    case "audit": {
-      const { runAudit } = await import("./commands/audit.js");
-      await runAudit(commandArgs);
       break;
     }
     case "import": {

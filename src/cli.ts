@@ -112,6 +112,11 @@ async function main(): Promise<void> {
       await runCache(args.slice(1));
       break;
     }
+    case "audit": {
+      const { runAudit } = await import("./commands/audit.js");
+      await runAudit(args.slice(1));
+      break;
+    }
     default:
       console.error(`Command '${command}' is not yet implemented.`);
       process.exit(1);

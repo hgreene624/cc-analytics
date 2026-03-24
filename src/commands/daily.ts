@@ -166,18 +166,85 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
   }
 
   const chartWidth = 45;
+  const windowHours = 5;
+  const windowMs2 = windowHours * 60 * 60 * 1000;
 
-  console.log(`\n# Rate of Usage — ${dateLabel} (Rate-Limit Tokens per ${stepMinutes}min)\n`);
+  // Determine session window boundaries
+  // Find the first activity timestamp to anchor windows
+  const firstActivityTs = sortedCalls[0].ts;
+  const windowAnchor = firstActivityTs - (firstActivityTs % (60 * 60 * 1000)); // round down to hour
+
+  // Assign each bucket to a session window
+  const barChars = ["█", "▓"];
+  let windowNum = 0;
+  let windowEnd = windowAnchor + windowMs2;
+
+  // Pre-compute window assignments and totals
+  const windowTotals: { start: Date; end: Date; total: number; num: number }[] = [];
+  const bucketWindows: number[] = [];
 
   for (const b of displayRows) {
+    const t = b.time.getTime();
+    // Advance windows as needed
+    while (t >= windowEnd) {
+      windowEnd += windowMs2;
+      windowNum++;
+    }
+    bucketWindows.push(windowNum);
+
+    // Track window totals
+    const wIdx = windowNum;
+    while (windowTotals.length <= wIdx) {
+      const wStart = new Date(windowAnchor + windowTotals.length * windowMs2);
+      const wEnd = new Date(wStart.getTime() + windowMs2);
+      windowTotals.push({ start: wStart, end: wEnd, total: 0, num: windowTotals.length });
+    }
+    windowTotals[wIdx].total += b.rateLimitTokens;
+  }
+
+  const stepLabel = stepMinutes >= 60 ? `${stepMinutes / 60}hr` : `${stepMinutes}min`;
+  console.log(`\n# Rate of Usage — ${dateLabel} (Rate-Limit Tokens per ${stepLabel})\n`);
+
+  let lastWindowNum = -1;
+  const sepWidth = 6 + 3 + chartWidth + 8;
+
+  for (let i = 0; i < displayRows.length; i++) {
+    const b = displayRows[i];
+    const wNum = bucketWindows[i];
+
+    // Print session window separator
+    if (wNum !== lastWindowNum) {
+      if (lastWindowNum >= 0) {
+        console.log(`     │${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+      }
+      lastWindowNum = wNum;
+    }
+
     const time = timeLabel(b.time);
-    const chart = bar(b.rateLimitTokens, maxRL, chartWidth);
+    const charIdx = wNum % barChars.length;
+    const chart = barChars[charIdx].repeat(Math.max(0, Math.round((b.rateLimitTokens / maxRL) * chartWidth)));
     console.log(`${time} │ ${chart.padEnd(chartWidth)} ${fmt(b.rateLimitTokens).padStart(6)}`);
   }
 
-  console.log(`     └${"─".repeat(chartWidth + 8)}`);
+  // Final window separator
+  if (lastWindowNum >= 0) {
+    console.log(`     │${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+  }
+
+  console.log(`     └${"─".repeat(sepWidth - 6)}`);
 
   const avgPerInterval = activeIntervals > 0 ? Math.round(totalRL / activeIntervals) : 0;
-  console.log(`\nPeak: ${timeLabel(peakRow.time)} (${fmt(peakRow.rateLimitTokens)}/${stepMinutes}min) • Total: ${fmt(totalRL)} • Avg active interval: ${fmt(avgPerInterval)}`);
+  console.log(`\nPeak: ${timeLabel(peakRow.time)} (${fmt(peakRow.rateLimitTokens)}/${stepLabel}) • Total: ${fmt(totalRL)} • Avg active: ${fmt(avgPerInterval)}/${stepLabel}`);
+
+  // Window summary
+  const activeWindows = windowTotals.filter((w) => w.total > 0);
+  if (activeWindows.length > 0) {
+    console.log(`\nSession windows (${windowHours}h each):\n`);
+    for (const w of activeWindows) {
+      const pct = ((w.total / 14_300_000) * 100).toFixed(0);
+      console.log(`  Window ${w.num + 1}: ${timeLabel(w.start)}–${timeLabel(w.end)} │ ${fmt(w.total).padStart(6)} (${pct}% of est. ceiling)`);
+    }
+  }
+
   console.log(``);
 }

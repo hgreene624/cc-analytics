@@ -2,7 +2,7 @@
 
 import { parseArgs } from "node:util";
 
-const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "hourly", "models", "teams", "projects", "cache", "anomalies", "audit", "import"] as const;
+const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "hourly", "daily", "models", "teams", "projects", "cache", "anomalies", "audit", "import"] as const;
 type Command = (typeof COMMANDS)[number];
 
 function printUsage(): void {
@@ -20,6 +20,7 @@ Commands:
   budget      Rolling window analysis
   trend       Daily trend with averages
   hourly      Hour-by-hour consumption chart
+  daily       Full-day session breakdown
   models      Model breakdown
   teams       Team analysis
   projects    Project directory analysis
@@ -95,6 +96,11 @@ async function main(): Promise<void> {
     case "hourly": {
       const { runHourly } = await import("./commands/hourly.js");
       await runHourly(commandArgs, useDb);
+      break;
+    }
+    case "daily": {
+      const { runDaily } = await import("./commands/daily.js");
+      await runDaily(commandArgs, useDb);
       break;
     }
     case "compare": {

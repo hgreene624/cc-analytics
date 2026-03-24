@@ -82,6 +82,36 @@ async function main(): Promise<void> {
       await runTrend(args.slice(1));
       break;
     }
+    case "compare": {
+      const { runCompare } = await import("./commands/compare.js");
+      await runCompare(args.slice(1));
+      break;
+    }
+    case "anomalies": {
+      const { runAnomalies } = await import("./commands/anomalies.js");
+      await runAnomalies(args.slice(1));
+      break;
+    }
+    case "models": {
+      const { runModels } = await import("./commands/models.js");
+      await runModels(args.slice(1));
+      break;
+    }
+    case "teams": {
+      const { runTeams } = await import("./commands/teams.js");
+      await runTeams(args.slice(1));
+      break;
+    }
+    case "projects": {
+      const { runProjects } = await import("./commands/projects.js");
+      await runProjects(args.slice(1));
+      break;
+    }
+    case "cache": {
+      const { runCache } = await import("./commands/cache.js");
+      await runCache(args.slice(1));
+      break;
+    }
     default:
       console.error(`Command '${command}' is not yet implemented.`);
       process.exit(1);

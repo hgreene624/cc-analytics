@@ -5,13 +5,14 @@ import { aggregateSessions } from "../aggregator.js";
 import { parseTimeValue } from "../time.js";
 import {
   formatTokens,
-  formatDuration,
   formatTime,
   truncateSessionId,
   markdownTable,
   formatPercent,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { queryApiCalls, querySessions } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -35,9 +36,6 @@ Examples:
 `);
 }
 
-/**
- * Parse a window duration string (e.g., "5h", "3h", "90m") into milliseconds.
- */
 function parseWindowDuration(value: string): number {
   const match = value.match(/^(\d+)(h|m)$/);
   if (!match) throw new Error(`Invalid window duration: "${value}". Use format like 5h or 90m.`);
@@ -46,7 +44,7 @@ function parseWindowDuration(value: string): number {
   return unit === "h" ? amount * 3600_000 : amount * 60_000;
 }
 
-export async function runBudget(args: string[]): Promise<void> {
+export async function runBudget(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -67,47 +65,57 @@ export async function runBudget(args: string[]): Promise<void> {
   const windowMs = parseWindowDuration(values.window!);
   const windowStart = new Date(windowEnd.getTime() - windowMs);
 
-  // Discover files in the window (with some extra margin for mtime vs content timestamps)
-  const margin = 3600_000; // 1h margin
-  const files = await discoverFiles({
-    since: new Date(windowStart.getTime() - margin),
-    until: new Date(windowEnd.getTime() + margin),
-  });
+  let windowCalls: ApiCall[];
+  let sessionInfoMap: Map<string, { projectDir: string; teamName?: string }>;
 
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified window.");
-    return;
+  if (useDb) {
+    const db = openDatabase();
+    const allCalls = queryApiCalls(db, { since: windowStart, until: windowEnd });
+    windowCalls = allCalls;
+    const dbSessions = querySessions(db, { since: windowStart, until: windowEnd });
+    sessionInfoMap = new Map(dbSessions.map((s) => [s.sessionId, { projectDir: s.projectDir, teamName: s.teamName }]));
+    closeDatabase();
+  } else {
+    const margin = 3600_000;
+    const files = await discoverFiles({
+      since: new Date(windowStart.getTime() - margin),
+      until: new Date(windowEnd.getTime() + margin),
+    });
+
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified window.");
+      return;
+    }
+
+    const callsByFile = new Map<string, ApiCall[]>();
+    const allCalls: ApiCall[] = [];
+
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        if (calls.length > 0) {
+          callsByFile.set(file.path, calls);
+          allCalls.push(...calls);
+        }
+      } catch { /* skip */ }
+    }
+
+    windowCalls = allCalls.filter((c) => {
+      const t = new Date(c.timestamp).getTime();
+      return t >= windowStart.getTime() && t <= windowEnd.getTime();
+    });
+
+    const sessions = aggregateSessions(files, callsByFile);
+    sessionInfoMap = new Map(sessions.map((s) => [s.sessionId, { projectDir: s.projectDir, teamName: s.teamName }]));
   }
-
-  // Parse all files
-  const callsByFile = new Map<string, ApiCall[]>();
-  const allCalls: ApiCall[] = [];
-
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      if (calls.length > 0) {
-        callsByFile.set(file.path, calls);
-        allCalls.push(...calls);
-      }
-    } catch { /* skip */ }
-  }
-
-  // Filter calls to the actual window
-  const windowCalls = allCalls.filter((c) => {
-    const t = new Date(c.timestamp).getTime();
-    return t >= windowStart.getTime() && t <= windowEnd.getTime();
-  });
 
   if (windowCalls.length === 0) {
     console.log(`No API calls found in window ${formatTime(windowStart.toISOString())} → ${formatTime(windowEnd.toISOString())}.`);
     return;
   }
 
-  // Sort by timestamp
   windowCalls.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  // Aggregate by session
   const sessionMap = new Map<string, { calls: ApiCall[]; totalTokens: number; rateLimitTokens: number }>();
   let totalTokens = 0;
   let rateLimitTokens = 0;
@@ -115,7 +123,6 @@ export async function runBudget(args: string[]): Promise<void> {
   for (const call of windowCalls) {
     totalTokens += call.totalTokens;
     rateLimitTokens += call.rateLimitTokens;
-
     if (!sessionMap.has(call.sessionId)) {
       sessionMap.set(call.sessionId, { calls: [], totalTokens: 0, rateLimitTokens: 0 });
     }
@@ -125,11 +132,6 @@ export async function runBudget(args: string[]): Promise<void> {
     entry.rateLimitTokens += call.rateLimitTokens;
   }
 
-  // Get session summaries for project/team info
-  const sessions = aggregateSessions(files, callsByFile);
-  const sessionInfoMap = new Map(sessions.map((s) => [s.sessionId, s]));
-
-  // Acceleration detection: find per-minute rates and detect spike
   const minuteBuckets = new Map<number, number>();
   for (const call of windowCalls) {
     const t = new Date(call.timestamp).getTime();
@@ -142,7 +144,6 @@ export async function runBudget(args: string[]): Promise<void> {
     ? minuteRates.reduce((sum, [, tokens]) => sum + tokens, 0) / minuteRates.length
     : 0;
 
-  // Find acceleration point: first minute where rate > 2x average
   let accelerationPoint: { time: Date; rate: number } | null = null;
   for (const [minuteKey, tokens] of minuteRates) {
     if (tokens > avgRate * 2) {
@@ -163,11 +164,7 @@ export async function runBudget(args: string[]): Promise<void> {
       .sort((a, b) => b.totalTokens - a.totalTokens);
 
     console.log(JSON.stringify({
-      window: {
-        start: windowStart.toISOString(),
-        end: windowEnd.toISOString(),
-        durationMs: windowMs,
-      },
+      window: { start: windowStart.toISOString(), end: windowEnd.toISOString(), durationMs: windowMs },
       summary: { totalTokens, rateLimitTokens, sessionCount: sessionMap.size, callCount: windowCalls.length },
       accelerationPoint: accelerationPoint
         ? { time: accelerationPoint.time.toISOString(), tokensPerMinute: accelerationPoint.rate }
@@ -177,7 +174,6 @@ export async function runBudget(args: string[]): Promise<void> {
     return;
   }
 
-  // Window summary
   console.log(`\n**Budget Window** — ${formatTime(windowStart.toISOString())} → ${formatTime(windowEnd.toISOString())} (${values.window})\n`);
   console.log(`- **Total Tokens:** ${formatTokens(totalTokens)}`);
   console.log(`- **Rate Limit Tokens:** ${formatTokens(rateLimitTokens)}`);
@@ -191,7 +187,6 @@ export async function runBudget(args: string[]): Promise<void> {
     console.log(`- **Acceleration:** No spike detected (no minute exceeded 2x average rate)`);
   }
 
-  // Session contribution table
   console.log(`\n**Session Contributions** (sorted by token usage)\n`);
 
   const sortedSessions = Array.from(sessionMap.entries())

@@ -6,6 +6,8 @@ import {
   formatTokens,
   markdownTable,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { queryApiCalls } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -37,7 +39,7 @@ interface DayStats {
   isOutlier: boolean;
 }
 
-export async function runTrend(args: string[]): Promise<void> {
+export async function runTrend(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -61,24 +63,31 @@ export async function runTrend(args: string[]): Promise<void> {
   since.setDate(since.getDate() - numDays);
   since.setHours(0, 0, 0, 0);
 
-  // Discover and parse
-  const files = await discoverFiles({ since });
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified time window.");
-    return;
-  }
+  let allCalls: ApiCall[];
 
-  const callsByFile = new Map<string, ApiCall[]>();
-  const allCalls: ApiCall[] = [];
+  if (useDb) {
+    const db = openDatabase();
+    allCalls = queryApiCalls(db, { since });
+    closeDatabase();
+  } else {
+    const files = await discoverFiles({ since });
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified time window.");
+      return;
+    }
 
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      if (calls.length > 0) {
-        callsByFile.set(file.path, calls);
-        allCalls.push(...calls);
-      }
-    } catch { /* skip */ }
+    const callsByFile = new Map<string, ApiCall[]>();
+    allCalls = [];
+
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        if (calls.length > 0) {
+          callsByFile.set(file.path, calls);
+          allCalls.push(...calls);
+        }
+      } catch { /* skip */ }
+    }
   }
 
   // Group calls by date (local timezone)

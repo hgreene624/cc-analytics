@@ -11,6 +11,8 @@ import {
   markdownTable,
   formatProjectDir,
 } from "../formatter.js";
+import { openDatabase, closeDatabase } from "../db/connection.js";
+import { querySessions } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
@@ -35,7 +37,7 @@ Examples:
 `);
 }
 
-export async function runTop(args: string[]): Promise<void> {
+export async function runTop(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -59,22 +61,26 @@ export async function runTop(args: string[]): Promise<void> {
   const limit = parseInt(values.n!, 10) || 10;
   const sortBy = values.by === "rate_limit" ? "rate_limit" : "total";
 
-  // Discover → Parse → Aggregate
-  const files = await discoverFiles({ since, until });
-  if (files.length === 0) {
-    console.log("No JSONL files found in the specified time window.");
-    return;
+  let sessions;
+  if (useDb) {
+    const db = openDatabase();
+    sessions = querySessions(db, { since, until });
+    closeDatabase();
+  } else {
+    const files = await discoverFiles({ since, until });
+    if (files.length === 0) {
+      console.log("No JSONL files found in the specified time window.");
+      return;
+    }
+    const callsByFile = new Map<string, ApiCall[]>();
+    for (const file of files) {
+      try {
+        const calls = await parseSessionFile(file.path);
+        if (calls.length > 0) callsByFile.set(file.path, calls);
+      } catch { /* skip */ }
+    }
+    sessions = aggregateSessions(files, callsByFile);
   }
-
-  const callsByFile = new Map<string, ApiCall[]>();
-  for (const file of files) {
-    try {
-      const calls = await parseSessionFile(file.path);
-      if (calls.length > 0) callsByFile.set(file.path, calls);
-    } catch { /* skip */ }
-  }
-
-  const sessions = aggregateSessions(files, callsByFile);
 
   // Sort by chosen field
   if (sortBy === "rate_limit") {

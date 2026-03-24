@@ -1,41 +1,35 @@
 import { parseArgs } from "node:util";
 import { discoverFiles } from "../discovery.js";
 import { parseSessionFile } from "../parser.js";
-import { parseTimeValue } from "../time.js";
 import { openDatabase, closeDatabase } from "../db/connection.js";
 import { queryApiCalls } from "../db/queries.js";
 import type { ApiCall } from "../parser.js";
 
 function printHelp(): void {
   console.log(`
-cc-analytics daily — Full-day session breakdown (rate-limit tokens)
+cc-analytics daily — Rolling window usage throughout the day
 
 Usage:
   cc-analytics daily [options]
 
-Options:
-  --date <value>    Date to chart (ISO date, or: today/yesterday). Default: today
-  --json            Output as JSON instead of chart
-  --help, -h        Show this help message
+Shows rate-limit token consumption in rolling 5-hour windows across the day,
+matching Claude's plan usage limit meter. Each row shows the cumulative
+rate-limit tokens in the 5 hours ending at that time.
 
-Shows every session in chronological order with rate-limit token consumption.
-Time on Y axis, rate-limit tokens on X axis, segmented by session.
+Options:
+  --date <value>      Date to chart (ISO date, or: today/yesterday). Default: today
+  --window <minutes>  Rolling window size in minutes (default: 300 = 5 hours)
+  --step <minutes>    Time step between rows in minutes (default: 15)
+  --ceiling <tokens>  Estimated token ceiling for % calculation (default: 14300000)
+  --json              Output as JSON instead of chart
+  --help, -h          Show this help message
 
 Examples:
   cc-analytics daily
   cc-analytics daily --date yesterday
-  cc-analytics daily --date 2026-03-20
+  cc-analytics daily --step 30
+  cc-analytics daily --ceiling 15000000
 `);
-}
-
-interface SessionRow {
-  sessionId: string;
-  shortId: string;
-  team: string;
-  startTime: Date;
-  endTime: Date;
-  rateLimitTokens: number;
-  apiCalls: number;
 }
 
 function fmt(n: number): string {
@@ -44,14 +38,14 @@ function fmt(n: number): string {
   return n.toString();
 }
 
-function timeLabel(d: Date): string {
-  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-}
-
 function bar(val: number, max: number, width: number): string {
   if (max === 0 || val === 0) return "";
   const len = Math.round((val / max) * width);
-  return "█".repeat(Math.max(len, 1));
+  return "█".repeat(Math.max(len, 0));
+}
+
+function timeLabel(d: Date): string {
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
 
 function resolveDate(dateStr: string): Date {
@@ -71,11 +65,20 @@ function resolveDate(dateStr: string): Date {
   return d;
 }
 
+interface WindowRow {
+  time: Date;
+  rateLimitTokens: number;
+  pctOfCeiling: number;
+}
+
 export async function runDaily(args: string[], useDb = false): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
       date: { type: "string", default: "today" },
+      window: { type: "string", default: "300" },
+      step: { type: "string", default: "15" },
+      ceiling: { type: "string", default: "14300000" },
       json: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -87,19 +90,28 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
     return;
   }
 
+  const windowMinutes = parseInt(values.window!, 10) || 300;
+  const stepMinutes = parseInt(values.step!, 10) || 15;
+  const ceiling = parseInt(values.ceiling!, 10) || 14_300_000;
+  const windowMs = windowMinutes * 60 * 1000;
+
   const dayStart = resolveDate(values.date!);
   const dayEnd = new Date(dayStart);
   dayEnd.setDate(dayEnd.getDate() + 1);
+  const isToday = dayStart.toDateString() === new Date().toDateString();
   const dateLabel = dayStart.toISOString().slice(0, 10);
+
+  // Need data from window-size before the day starts
+  const fetchStart = new Date(dayStart.getTime() - windowMs);
 
   let allCalls: ApiCall[];
 
   if (useDb) {
     const db = openDatabase();
-    allCalls = queryApiCalls(db, { since: dayStart, until: dayEnd });
+    allCalls = queryApiCalls(db, { since: fetchStart, until: dayEnd });
     closeDatabase();
   } else {
-    const files = await discoverFiles({ since: dayStart, until: dayEnd });
+    const files = await discoverFiles({ since: fetchStart, until: dayEnd });
     if (files.length === 0) {
       console.log("No sessions found for " + dateLabel + ".");
       return;
@@ -113,98 +125,96 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
     }
   }
 
-  // Filter to this day only
-  const dayCalls = allCalls.filter((c) => {
-    const d = new Date(c.timestamp);
-    return d >= dayStart && d < dayEnd;
-  });
+  // Sort calls by timestamp
+  const sortedCalls = allCalls
+    .filter((c) => c.rateLimitTokens > 0)
+    .map((c) => ({ ts: new Date(c.timestamp).getTime(), rl: c.rateLimitTokens }))
+    .sort((a, b) => a.ts - b.ts);
 
-  if (dayCalls.length === 0) {
+  if (sortedCalls.length === 0) {
+    console.log("No rate-limit token activity found for " + dateLabel + ".");
+    return;
+  }
+
+  // Compute rolling window at each step
+  const rows: WindowRow[] = [];
+  const endTime = isToday ? new Date() : dayEnd;
+
+  for (let t = dayStart.getTime(); t <= endTime.getTime(); t += stepMinutes * 60 * 1000) {
+    const windowStart = t - windowMs;
+    let sum = 0;
+    for (const call of sortedCalls) {
+      if (call.ts > windowStart && call.ts <= t) {
+        sum += call.rl;
+      }
+    }
+    rows.push({
+      time: new Date(t),
+      rateLimitTokens: sum,
+      pctOfCeiling: (sum / ceiling) * 100,
+    });
+  }
+
+  // Trim leading zeros
+  const firstNonZero = rows.findIndex((r) => r.rateLimitTokens > 0);
+  const startIdx = Math.max(0, firstNonZero - 1); // one row before first activity
+  const displayRows = rows.slice(startIdx);
+
+  if (displayRows.length === 0) {
     console.log("No activity found for " + dateLabel + ".");
     return;
   }
 
-  // Group by session
-  const sessionMap = new Map<string, {
-    calls: ApiCall[];
-    team: string;
-  }>();
-
-  for (const call of dayCalls) {
-    if (!sessionMap.has(call.sessionId)) {
-      sessionMap.set(call.sessionId, { calls: [], team: call.teamName || "" });
-    }
-    const entry = sessionMap.get(call.sessionId)!;
-    entry.calls.push(call);
-    // Prefer non-empty team name
-    if (call.teamName && !entry.team) entry.team = call.teamName;
-  }
-
-  // Build session rows
-  const rows: SessionRow[] = [];
-  for (const [sid, data] of sessionMap) {
-    const timestamps = data.calls.map((c) => new Date(c.timestamp).getTime());
-    const rl = data.calls.reduce((s, c) => s + c.rateLimitTokens, 0);
-    if (rl === 0) continue; // skip zero-contribution sessions
-
-    rows.push({
-      sessionId: sid,
-      shortId: sid.slice(0, 8),
-      team: data.team || "-",
-      startTime: new Date(Math.min(...timestamps)),
-      endTime: new Date(Math.max(...timestamps)),
-      rateLimitTokens: rl,
-      apiCalls: data.calls.length,
-    });
-  }
-
-  // Sort by start time
-  rows.sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
-
-  if (rows.length === 0) {
-    console.log("No sessions with rate-limit tokens found for " + dateLabel + ".");
-    return;
-  }
-
-  const totalRL = rows.reduce((s, r) => s + r.rateLimitTokens, 0);
-  const maxRL = Math.max(...rows.map((r) => r.rateLimitTokens));
-
   if (values.json) {
     console.log(JSON.stringify({
       date: dateLabel,
-      sessions: rows.map((r) => ({
-        sessionId: r.sessionId,
-        team: r.team,
-        start: r.startTime.toISOString(),
-        end: r.endTime.toISOString(),
+      windowMinutes,
+      stepMinutes,
+      ceiling,
+      rows: displayRows.map((r) => ({
+        time: r.time.toISOString(),
         rateLimitTokens: r.rateLimitTokens,
-        apiCalls: r.apiCalls,
+        pctOfCeiling: Math.round(r.pctOfCeiling * 10) / 10,
       })),
-      summary: {
-        totalRateLimitTokens: totalRL,
-        sessionCount: rows.length,
-        peakSession: rows.reduce((best, r) => r.rateLimitTokens > best.rateLimitTokens ? r : best).sessionId,
-      },
     }, null, 2));
     return;
   }
 
-  const chartWidth = 35;
+  const chartWidth = 40;
+  const windowHours = windowMinutes / 60;
+  const peakRow = displayRows.reduce((best, r) => r.rateLimitTokens > best.rateLimitTokens ? r : best);
 
-  // Compute longest label for alignment
-  const teamMaxLen = Math.min(20, Math.max(...rows.map((r) => r.team.length)));
+  console.log(`\n# Rolling ${windowHours}h Window — ${dateLabel} (Rate-Limit Tokens)\n`);
+  console.log(`Ceiling estimate: ${fmt(ceiling)} • Each row = cumulative RL tokens in prior ${windowHours}h\n`);
 
-  console.log(`\n# Daily Session Breakdown — ${dateLabel} (Rate-Limit Tokens)\n`);
+  // Use ceiling as the max for the bar chart so the bar shows % of limit
+  const barMax = Math.max(ceiling, peakRow.rateLimitTokens);
 
-  for (const r of rows) {
-    const time = timeLabel(r.startTime);
-    const team = r.team.length > 20 ? r.team.slice(0, 19) + "…" : r.team.padEnd(teamMaxLen);
-    const chart = bar(r.rateLimitTokens, maxRL, chartWidth);
-    const pct = ((r.rateLimitTokens / totalRL) * 100).toFixed(1);
-    console.log(`${time} ${r.shortId} ${team} │ ${chart.padEnd(chartWidth)} ${fmt(r.rateLimitTokens).padStart(6)} (${pct.padStart(4)}%)`);
+  for (const r of displayRows) {
+    const time = timeLabel(r.time);
+    const pct = r.pctOfCeiling;
+    const chart = bar(r.rateLimitTokens, barMax, chartWidth);
+
+    // Color-code the percentage marker
+    let marker = "";
+    if (pct >= 80) marker = " !!";
+    else if (pct >= 60) marker = " !";
+
+    console.log(`${time} │ ${chart.padEnd(chartWidth)} ${fmt(r.rateLimitTokens).padStart(6)} ${(pct.toFixed(0) + "%").padStart(4)}${marker}`);
   }
 
-  console.log(`${"".padEnd(8 + 1 + 8 + 1 + teamMaxLen)} └${"─".repeat(chartWidth + 16)}`);
-  console.log(`\n**${rows.length} sessions** • ${fmt(totalRL)} total rate-limit tokens • Peak: ${rows.reduce((best, r) => r.rateLimitTokens > best.rateLimitTokens ? r : best).shortId} (${fmt(maxRL)})`);
+  console.log(`     └${"─".repeat(chartWidth + 16)}`);
+
+  // Summary
+  console.log(`\nPeak: ${timeLabel(peakRow.time)} at ${fmt(peakRow.rateLimitTokens)} (${peakRow.pctOfCeiling.toFixed(0)}% of ceiling)`);
+
+  // Find when ceiling was closest to being hit
+  const dangerRows = displayRows.filter((r) => r.pctOfCeiling >= 60);
+  if (dangerRows.length > 0) {
+    const dangerStart = timeLabel(dangerRows[0].time);
+    const dangerEnd = timeLabel(dangerRows[dangerRows.length - 1].time);
+    console.log(`Elevated (>60%): ${dangerStart}–${dangerEnd} (${dangerRows.length * stepMinutes} minutes)`);
+  }
+
   console.log(``);
 }

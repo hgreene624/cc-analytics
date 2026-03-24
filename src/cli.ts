@@ -28,8 +28,9 @@ Commands:
   import      Import JSONL to SQLite (optional)
 
 Global Options:
-  --help, -h  Show this help message
-  --version   Show version
+  --db          Query SQLite database instead of parsing JSONL
+  --help, -h    Show this help message
+  --version     Show version
 
 Run 'cc-analytics <command> --help' for command-specific options.
 `);
@@ -56,60 +57,78 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Extract --db flag before passing remaining args to commands
+  const commandArgs = args.slice(1);
+  const dbFlagIndex = commandArgs.indexOf("--db");
+  const useDb = dbFlagIndex !== -1;
+  if (useDb) {
+    commandArgs.splice(dbFlagIndex, 1);
+  }
+
   switch (command) {
     case "scan": {
       const { runScan } = await import("./commands/scan.js");
-      await runScan(args.slice(1));
+      await runScan(commandArgs, useDb);
       break;
     }
     case "top": {
       const { runTop } = await import("./commands/top.js");
-      await runTop(args.slice(1));
+      await runTop(commandArgs, useDb);
       break;
     }
     case "detail": {
       const { runDetail } = await import("./commands/detail.js");
-      await runDetail(args.slice(1));
+      await runDetail(commandArgs, useDb);
       break;
     }
     case "budget": {
       const { runBudget } = await import("./commands/budget.js");
-      await runBudget(args.slice(1));
+      await runBudget(commandArgs, useDb);
       break;
     }
     case "trend": {
       const { runTrend } = await import("./commands/trend.js");
-      await runTrend(args.slice(1));
+      await runTrend(commandArgs, useDb);
       break;
     }
     case "compare": {
       const { runCompare } = await import("./commands/compare.js");
-      await runCompare(args.slice(1));
+      await runCompare(commandArgs, useDb);
       break;
     }
     case "anomalies": {
       const { runAnomalies } = await import("./commands/anomalies.js");
-      await runAnomalies(args.slice(1));
+      await runAnomalies(commandArgs, useDb);
       break;
     }
     case "models": {
       const { runModels } = await import("./commands/models.js");
-      await runModels(args.slice(1));
+      await runModels(commandArgs, useDb);
       break;
     }
     case "teams": {
       const { runTeams } = await import("./commands/teams.js");
-      await runTeams(args.slice(1));
+      await runTeams(commandArgs, useDb);
       break;
     }
     case "projects": {
       const { runProjects } = await import("./commands/projects.js");
-      await runProjects(args.slice(1));
+      await runProjects(commandArgs, useDb);
       break;
     }
     case "cache": {
       const { runCache } = await import("./commands/cache.js");
-      await runCache(args.slice(1));
+      await runCache(commandArgs, useDb);
+      break;
+    }
+    case "audit": {
+      const { runAudit } = await import("./commands/audit.js");
+      await runAudit(commandArgs);
+      break;
+    }
+    case "import": {
+      const { runImport } = await import("./commands/import.js");
+      await runImport(commandArgs);
       break;
     }
     default:

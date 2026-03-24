@@ -14,17 +14,19 @@ Usage:
 
 Shows rate-limit tokens consumed per time interval across the day.
 Each row is the tokens spent in that interval — not cumulative.
+Bars are grouped by 5-hour session windows with alternating styles.
 
 Options:
   --date <value>      Date to chart (ISO date, or: today/yesterday). Default: today
   --step <minutes>    Time interval in minutes (default: 15)
+  --anchor <HH:MM>    Anchor session windows to this time (default: midnight)
   --json              Output as JSON instead of chart
   --help, -h          Show this help message
 
 Examples:
   cc-analytics daily
-  cc-analytics daily --date yesterday
-  cc-analytics daily --step 30
+  cc-analytics daily --date yesterday --step 60
+  cc-analytics daily --anchor 10:00 --step 60
 `);
 }
 
@@ -67,6 +69,7 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
     options: {
       date: { type: "string", default: "today" },
       step: { type: "string", default: "15" },
+      anchor: { type: "string" },
       json: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -170,9 +173,16 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
   const windowMs2 = windowHours * 60 * 60 * 1000;
 
   // Determine session window boundaries
-  // Find the first activity timestamp to anchor windows
-  const firstActivityTs = sortedCalls[0].ts;
-  const windowAnchor = firstActivityTs - (firstActivityTs % (60 * 60 * 1000)); // round down to hour
+  // Anchor to midnight by default, or to --anchor HH:MM if provided
+  let windowAnchor: number;
+  if (values.anchor) {
+    const [hh, mm] = values.anchor.split(":").map(Number);
+    const anchorDate = new Date(dayStart);
+    anchorDate.setHours(hh || 0, mm || 0, 0, 0);
+    windowAnchor = anchorDate.getTime();
+  } else {
+    windowAnchor = dayStart.getTime(); // midnight
+  }
 
   // Assign each bucket to a session window
   const barChars = ["█", "▓"];
@@ -205,31 +215,42 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
   const stepLabel = stepMinutes >= 60 ? `${stepMinutes / 60}hr` : `${stepMinutes}min`;
   console.log(`\n# Rate of Usage — ${dateLabel} (Rate-Limit Tokens per ${stepLabel})\n`);
 
+  // Build sequential display numbering for active windows only
+  const activeWindowNums = [...new Set(bucketWindows)];
+  const displayNum = new Map<number, number>();
+  let seq = 1;
+  for (const wn of activeWindowNums) {
+    displayNum.set(wn, seq++);
+  }
+
   let lastWindowNum = -1;
   const sepWidth = 6 + 3 + chartWidth + 8;
 
   for (let i = 0; i < displayRows.length; i++) {
     const b = displayRows[i];
     const wNum = bucketWindows[i];
+    const dNum = displayNum.get(wNum)!;
 
     // Print session window separator
     if (wNum !== lastWindowNum) {
       if (lastWindowNum >= 0) {
-        console.log(`      ${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+        const prevDNum = displayNum.get(lastWindowNum)!;
+        console.log(`      ${"╌".repeat(sepWidth - 6)} window ${prevDNum}: ${fmt(windowTotals[lastWindowNum].total)}`);
         console.log(``);
       }
       lastWindowNum = wNum;
     }
 
     const time = timeLabel(b.time);
-    const charIdx = wNum % barChars.length;
+    const charIdx = dNum % barChars.length;
     const chart = barChars[charIdx].repeat(Math.max(0, Math.round((b.rateLimitTokens / maxRL) * chartWidth)));
     console.log(`${time}  ${chart.padEnd(chartWidth)} ${fmt(b.rateLimitTokens).padStart(6)}`);
   }
 
   // Final window separator
   if (lastWindowNum >= 0) {
-    console.log(`      ${"╌".repeat(sepWidth - 6)} window ${lastWindowNum + 1}: ${fmt(windowTotals[lastWindowNum].total)}`);
+    const prevDNum = displayNum.get(lastWindowNum)!;
+    console.log(`      ${"╌".repeat(sepWidth - 6)} window ${prevDNum}: ${fmt(windowTotals[lastWindowNum].total)}`);
   }
 
   console.log(``);
@@ -237,13 +258,14 @@ export async function runDaily(args: string[], useDb = false): Promise<void> {
   const avgPerInterval = activeIntervals > 0 ? Math.round(totalRL / activeIntervals) : 0;
   console.log(`\nPeak: ${timeLabel(peakRow.time)} (${fmt(peakRow.rateLimitTokens)}/${stepLabel}) • Total: ${fmt(totalRL)} • Avg active: ${fmt(avgPerInterval)}/${stepLabel}`);
 
-  // Window summary
+  // Window summary — sequential numbering, only active windows
   const activeWindows = windowTotals.filter((w) => w.total > 0);
   if (activeWindows.length > 0) {
     console.log(`\nSession windows (${windowHours}h each):\n`);
     for (const w of activeWindows) {
+      const dNum = displayNum.get(w.num)!;
       const pct = ((w.total / 14_300_000) * 100).toFixed(0);
-      console.log(`  Window ${w.num + 1}: ${timeLabel(w.start)}–${timeLabel(w.end)} │ ${fmt(w.total).padStart(6)} (${pct}% of est. ceiling)`);
+      console.log(`  Window ${dNum}: ${timeLabel(w.start)}–${timeLabel(w.end)} │ ${fmt(w.total).padStart(6)} (${pct}% of est. ceiling)`);
     }
   }
 

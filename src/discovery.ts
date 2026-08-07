@@ -88,9 +88,11 @@ export async function discoverFiles(options: DiscoverOptions = {}): Promise<Disc
       const fileStat = await stat(filePath);
       const mtime = fileStat.mtime;
 
-      // Pre-filter by mtime before any further processing
+      // Pre-filter by mtime: if file was last modified before our window starts,
+      // it can't contain calls in the window. But a file modified AFTER the window
+      // end may still contain calls DURING the window (long-running sessions), so
+      // we only filter on the lower bound.
       if (options.since && mtime < options.since) return null;
-      if (options.until && mtime > options.until) return null;
 
       const isSubagent = SUBAGENT_PATTERN.test(filePath);
 

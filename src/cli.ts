@@ -2,7 +2,7 @@
 
 import { parseArgs } from "node:util";
 
-const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "hourly", "daily", "models", "teams", "projects", "cache", "anomalies", "audit", "import"] as const;
+const COMMANDS = ["scan", "top", "detail", "compare", "budget", "trend", "hourly", "daily", "models", "teams", "projects", "cache", "anomalies", "audit", "import", "track", "windows"] as const;
 type Command = (typeof COMMANDS)[number];
 
 function printUsage(): void {
@@ -28,6 +28,8 @@ Commands:
   anomalies   Flag outlier sessions
   audit       Full comprehensive audit
   import      Import JSONL to SQLite (optional)
+  track       Snapshot usage for ceiling tracking (cron-friendly)
+  windows     Window-level ceiling analysis and historical report
 
 Global Options:
   --db          Query SQLite database instead of parsing JSONL
@@ -138,9 +140,19 @@ async function main(): Promise<void> {
       await runImport(commandArgs);
       break;
     }
+    case "track": {
+      const { runTrack } = await import("./commands/track.js");
+      await runTrack(commandArgs, useDb);
+      break;
+    }
     case "audit": {
       const { runAudit } = await import("./commands/audit.js");
       await runAudit(args.slice(1));
+      break;
+    }
+    case "windows": {
+      const { runWindows } = await import("./commands/windows.js");
+      await runWindows(commandArgs, useDb);
       break;
     }
     default:
